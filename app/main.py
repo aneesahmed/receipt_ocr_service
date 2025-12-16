@@ -1,73 +1,102 @@
-from fastapi import FastAPI, UploadFile, File, Response
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
-import zipfile
-import io
-import json
 import logging
-from app.services.workflow import pipeline_process_image
 
-# Configure Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Import the workflow functions that handle the heavy lifting
+from app.services.workflow import (
+    workflow_vision_direct,
+    workflow_surya_pipeline
+)
 
-app = FastAPI(title="Receipt OCR Service")
+# 1. Logging Configuration
+# This ensures you see "Vision Request received" in your Docker logs
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("receipt-api")
+
+# 2. Initialize App
+app = FastAPI(
+    title="Receipt OCR Service",
+    description="Dual-Pipeline OCR Service: Qwen-Vision (Visual) vs Surya+Qwen (Text Logic)",
+    version="1.0.0"
+)
 
 
 @app.get("/")
 def health_check():
-    return {"status": "active", "service": "Receipt OCR"}
+    """Simple check to see if the server is running."""
+    return {
+        "status": "online",
+        "endpoints": [
+            "POST /ocr/vision - Best for complex layouts & tables",
+            "POST /ocr/surya  - Best for gas stations & faint text"
+        ]
+    }
 
 
-@app.post("/process/image")
-async def process_single(file: UploadFile = File(...)):
-    """Upload 1 image -> Get JSON"""
+# =========================================================
+#  ENDPOINT 1: VISION MODEL (Direct Image -> JSON)
+# =========================================================
+@app.post("/ocr/vision")
+async def endpoint_vision(file: UploadFile = File(...)):
+    """
+    Pipeline A:
+    1. Receives Raw Image
+    2. Crops it (GPU) internaly
+    3. Sends crop directly to Qwen-VL (Vision Model)
+    4. Returns JSON
+    """
     try:
-        logger.info(f"Processing single file: {file.filename}")
-        image_bytes = await file.read()
-        result = pipeline_process_image(image_bytes)
-        return JSONResponse(result)
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.info(f"👁️ Vision Request received: {file.filename}")
 
+        # Read file into memory (bytes)
+        data = await file.read()
 
-@app.post("/process/batch")
-async def process_batch(file: UploadFile = File(...)):
-    """Upload ZIP -> Get ZIP with JSONs"""
-    try:
-        logger.info(f"Processing batch zip: {file.filename}")
-        zip_bytes = await file.read()
-        input_zip = zipfile.ZipFile(io.BytesIO(zip_bytes))
-        output_io = io.BytesIO()
+        # Execute Workflow
+        result = workflow_vision_direct(data)
 
-        processed_count = 0
+        # Check for specific workflow errors
+        if "error" in result:
+            logger.warning(f"Vision failed: {result['error']}")
+            return JSONResponse(content=result, status_code=400)
 
-        with zipfile.ZipFile(output_io, 'w', zipfile.ZIP_DEFLATED) as out_zip:
-            for filename in input_zip.namelist():
-                if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                    try:
-                        with input_zip.open(filename) as img_file:
-                            img_data = img_file.read()
-
-                        # Run Pipeline
-                        result = pipeline_process_image(img_data)
-
-                        # Save JSON
-                        out_zip.writestr(f"{filename}.json", json.dumps(result, indent=2))
-                        processed_count += 1
-                        logger.info(f"Processed: {filename}")
-                    except Exception as e:
-                        out_zip.writestr(f"{filename}_error.txt", str(e))
-
-        output_io.seek(0)
-        logger.info(f"Batch complete. Processed {processed_count} files.")
-
-        return Response(
-            content=output_io.getvalue(),
-            media_type="application/zip",
-            headers={"Content-Disposition": "attachment; filename=results.zip"}
-        )
+        return JSONResponse(content=result)
 
     except Exception as e:
-        logger.error(f"Batch Error: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error(f"🔥 Critical Vision Error: {str(e)}")
+        return JSONResponse(content={"error": "Internal Server Error", "details": str(e)}, status_code=500)
+
+
+# =========================================================
+#  ENDPOINT 2: SURYA PIPELINE (OCR -> Text Parsing)
+# =========================================================
+@app.post("/ocr/surya")
+async def endpoint_surya(file: UploadFile = File(...)):
+    """
+    Pipeline B:
+    1. Receives Raw Image
+    2. Crops it (GPU) internally
+    3. Extracts Raw Text (Surya OCR)
+    4. Parses Text into JSON (Qwen Text Model)
+    5. Returns JSON
+    """
+    try:
+        logger.info(f"🧠 Surya Request received: {file.filename}")
+
+        # Read file into memory (bytes)
+        data = await file.read()
+
+        # Execute Workflow
+        result = workflow_surya_pipeline(data)
+
+        if "error" in result:
+            logger.warning(f"Surya failed: {result['error']}")
+            return JSONResponse(content=result, status_code=400)
+
+        return JSONResponse(content=result)
+
+    except Exception as e:
+        logger.error(f"🔥 Critical Surya Error: {str(e)}")
+        return JSONResponse(content={"error": "Internal Server Error", "details": str(e)}, status_code=500)

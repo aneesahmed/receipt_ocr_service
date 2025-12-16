@@ -1,32 +1,37 @@
 import cv2
 import numpy as np
 import onnxruntime as ort
+# ---------------------------------------------------------
+# 1. IMPORT REMBG HERE
+# ---------------------------------------------------------
 from rembg import remove, new_session
-from PIL import Image
 
 
 class ImageCropper:
     def __init__(self, model_name="birefnet-general"):
-        # 1. GPU Check for Rembg/ONNX
+        # Check for GPU
         providers = ort.get_available_providers()
         if 'CUDAExecutionProvider' in providers:
-            print(f"✅ Cropper: GPU Enabled (CUDA Found)")
             self.providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            print(f"✅ Cropper: GPU Enabled.")
         else:
-            print(f"⚠️ Cropper: GPU NOT found. Using CPU.")
             self.providers = ['CPUExecutionProvider']
+            print(f"⚠️ Cropper: GPU NOT found. Using CPU.")
 
+        # ---------------------------------------------------------
+        # 2. LOAD REMBG MODEL (ONCE)
+        # ---------------------------------------------------------
         print(f"✂️ Loading Rembg Model: {model_name}...")
         self.session = new_session(model_name, providers=self.providers)
 
     def order_points(self, pts):
         rect = np.zeros((4, 2), dtype="float32")
         s = pts.sum(axis=1)
-        rect[0] = pts[np.argmin(s)]  # TL
-        rect[2] = pts[np.argmax(s)]  # BR
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
         diff = np.diff(pts, axis=1)
-        rect[1] = pts[np.argmin(diff)]  # TR
-        rect[3] = pts[np.argmax(diff)]  # BL
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
         return rect
 
     def four_point_transform(self, image, pts):
@@ -51,27 +56,33 @@ class ImageCropper:
         return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
     def process(self, image_bytes: bytes) -> np.ndarray:
-        # 1. Background Removal
+        # ---------------------------------------------------------
+        # 3. USE REMBG HERE (Generate Mask)
+        # ---------------------------------------------------------
+        # We use only_mask=True because we just want the white/black silhouette
+        # to find the contours of the receipt.
         mask_bytes = remove(image_bytes, session=self.session, only_mask=True)
+
         mask_np = np.frombuffer(mask_bytes, np.uint8)
         mask = cv2.imdecode(mask_np, cv2.IMREAD_GRAYSCALE)
 
-        # 2. Decode Original
+        # 4. Decode Original Image
         nparr = np.frombuffer(image_bytes, np.uint8)
         original = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if original is None: return None
 
-        # 3. Find Receipt Contour
+        # 5. Find Contours (Using the Rembg mask)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
-            return original  # Return original if no object found
+            # If Rembg removed everything, return original
+            return original
 
         c = max(contours, key=cv2.contourArea)
         peri = cv2.arcLength(c, True)
         approx = cv2.approxPolyDP(c, 0.02 * peri, True)
 
-        # 4. Warp (Scanner Effect) or Deskew (Crop)
+        # 6. Apply Perspective Warp (The "Scan" effect)
         if len(approx) == 4:
             processed = self.four_point_transform(original, approx.reshape(4, 2))
         else:
@@ -80,7 +91,7 @@ class ImageCropper:
             box = np.int64(box)
             processed = self.four_point_transform(original, box)
 
-        # 5. Enforce Portrait Orientation
+        # 7. Rotate if Landscape
         h, w = processed.shape[:2]
         if w > h:
             processed = cv2.rotate(processed, cv2.ROTATE_90_CLOCKWISE)

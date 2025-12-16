@@ -1,28 +1,73 @@
-from app.processors.cropper import ImageCropper
-from app.processors.ocr_engine import SuryaOCR
-from app.processors.parser import ReceiptParser
-from PIL import Image
+import io
 import cv2
+from PIL import Image
+# Import your 4 processors
+from app.processors.cropper import ImageCropper
+from app.processors.surya_ocr import SuryaOCR
+from app.processors.surya_ocr_parser import SuryaParser
+from app.processors.ollama_vision_ocr import OllamaVisionOCR
 
-# Initialize Singletons (Loads models once at startup)
+# ==========================================
+# 1. INITIALIZE SINGLETONS (Run once at startup)
+# ==========================================
+print("🚀 Initializing Workflow Services...")
 cropper = ImageCropper()
-ocr = SuryaOCR()
-parser = ReceiptParser()
+surya_engine = SuryaOCR()
+surya_parser = SuryaParser()
+vision_engine = OllamaVisionOCR()
+print("✅ Workflow Services Ready.")
 
 
-def pipeline_process_image(image_bytes: bytes) -> dict:
-    # 1. Crop
+# ==========================================
+# 2. HELPER: Pre-processing
+# ==========================================
+def _crop_and_prep(image_bytes: bytes):
+    """
+    Shared Logic: 
+    1. Send raw bytes to GPU Cropper.
+    2. Convert result to PIL (for Surya).
+    3. Convert result to PNG Bytes (for Vision).
+    """
     cropped_cv2 = cropper.process(image_bytes)
+
     if cropped_cv2 is None:
-        return {"error": "Cropping failed or image empty"}
+        return None, None
 
-    # Convert OpenCV (BGR) to PIL (RGB)
-    cropped_pil = Image.fromarray(cv2.cvtColor(cropped_cv2, cv2.COLOR_BGR2RGB))
+    # Convert OpenCV (BGR) -> PIL (RGB)
+    image_pil = Image.fromarray(cv2.cvtColor(cropped_cv2, cv2.COLOR_BGR2RGB))
 
-    # 2. OCR
-    raw_text = ocr.run(cropped_pil)
+    # Convert PIL -> Bytes (PNG)
+    output_io = io.BytesIO()
+    image_pil.save(output_io, format='PNG')
+    cropped_bytes = output_io.getvalue()
 
-    # 3. Parse
-    json_data = parser.parse(raw_text)
+    return image_pil, cropped_bytes
 
-    return json_data
+
+# ==========================================
+# 3. PIPELINE A: VISION DIRECT
+# ==========================================
+def workflow_vision_direct(image_bytes: bytes) -> dict:
+    # Step 1: Crop
+    _, cropped_bytes = _crop_and_prep(image_bytes)
+    if not cropped_bytes:
+        return {"error": "Cropping failed - could not detect receipt"}
+
+    # Step 2: Vision Model
+    return vision_engine.parse(cropped_bytes)
+
+
+# ==========================================
+# 4. PIPELINE B: SURYA + TEXT PARSER
+# ==========================================
+def workflow_surya_pipeline(image_bytes: bytes) -> dict:
+    # Step 1: Crop
+    image_pil, _ = _crop_and_prep(image_bytes)
+    if not image_pil:
+        return {"error": "Cropping failed - could not detect receipt"}
+
+    # Step 2: Extract Text (Surya)
+    raw_text = surya_engine.run(image_pil)
+
+    # Step 3: Parse Text (Qwen Text Model)
+    return surya_parser.parse(raw_text)
