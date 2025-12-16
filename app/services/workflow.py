@@ -71,3 +71,21 @@ def workflow_surya_pipeline(image_bytes: bytes) -> dict:
 
     # Step 3: Parse Text (Qwen Text Model)
     return surya_parser.parse(raw_text)
+
+
+# ... (Previous imports and init code) ...
+
+# ==========================================
+# 5. PIPELINE C: CROP ONLY (Returns Bytes)
+# ==========================================
+def workflow_get_cropped_image(image_bytes: bytes):
+    """
+    Returns the raw PNG bytes of the cropped receipt.
+    """
+    # Use the shared helper we already wrote
+    _, cropped_bytes = _crop_and_prep(image_bytes)
+
+    if not cropped_bytes:
+        return None
+
+    return cropped_bytes
