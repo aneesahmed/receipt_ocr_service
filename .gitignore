@@ -1,0 +1,41 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual Environments ---
+venv/
+env/
+.venv/
+.env
+
+# --- PyCharm / IDEs ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Operating System ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Project Specific (Data & Outputs) ---
+# Don't upload test images or results
+inputs/
+outputs/
+output_remote/
+output_scanned/
+
+# Ignore zipped results if generated locally
+*.zip
+
+# Ignore logs
+*.log
+
+# --- Model Weights (Optional) ---
+# If you ever download heavy models locally, ignore them
+*.pt
+*.pth
+*.onnx
+*.bin

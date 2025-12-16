@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+# Image Processing
+opencv-python-headless
+numpy
+Pillow
+# AI / GPU Libraries
+rembg[gpu]
+surya-ocr
+ollama
+# PyTorch
+torch
+torchvision
+torchaudio
