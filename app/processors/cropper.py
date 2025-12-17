@@ -1,9 +1,6 @@
 import cv2
 import numpy as np
 import onnxruntime as ort
-# ---------------------------------------------------------
-# 1. IMPORT REMBG HERE
-# ---------------------------------------------------------
 from rembg import remove, new_session
 
 
@@ -18,10 +15,6 @@ class ImageCropper:
             self.providers = ['CPUExecutionProvider']
             print(f"⚠️ Cropper: GPU NOT found. Using CPU.")
 
-        # ---------------------------------------------------------
-        # 2. LOAD REMBG MODEL (ONCE)
-        # ---------------------------------------------------------
-        print(f"✂️ Loading Rembg Model: {model_name}...")
         self.session = new_session(model_name, providers=self.providers)
 
     def order_points(self, pts):
@@ -56,44 +49,47 @@ class ImageCropper:
         return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
     def process(self, image_bytes: bytes) -> np.ndarray:
-        # ---------------------------------------------------------
-        # 3. USE REMBG HERE (Generate Mask)
-        # ---------------------------------------------------------
-        # We use only_mask=True because we just want the white/black silhouette
-        # to find the contours of the receipt.
-        mask_bytes = remove(image_bytes, session=self.session, only_mask=True)
-
-        mask_np = np.frombuffer(mask_bytes, np.uint8)
-        mask = cv2.imdecode(mask_np, cv2.IMREAD_GRAYSCALE)
-
-        # 4. Decode Original Image
+        # 1. Decode Original
         nparr = np.frombuffer(image_bytes, np.uint8)
         original = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if original is None: return None
 
-        # 5. Find Contours (Using the Rembg mask)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 2. Remove Background (Get Mask)
+        # using alpha_matting=True helps with edges on dark backgrounds
+        mask_bytes = remove(image_bytes, session=self.session, only_mask=True, alpha_matting=True)
+        mask_np = np.frombuffer(mask_bytes, np.uint8)
+        mask = cv2.imdecode(mask_np, cv2.IMREAD_GRAYSCALE)
 
+        # 3. Find Contours
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            # If Rembg removed everything, return original
+            return original  # Fallback to original if Rembg fails completely
+
+        # Get largest contour (the receipt)
+        c = max(contours, key=cv2.contourArea)
+
+        # 4. SAFETY CHECK: Is the contour big enough?
+        # If it's too small (noise), return original
+        if cv2.contourArea(c) < 5000:
             return original
 
-        c = max(contours, key=cv2.contourArea)
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        # 5. NEW LOGIC: "Safe Crop" (Bounding Box) vs "Warp"
+        # We prefer a simple bounding box crop for curved receipts
+        # because warping creates distortion.
+        x, y, w, h = cv2.boundingRect(c)
 
-        # 6. Apply Perspective Warp (The "Scan" effect)
-        if len(approx) == 4:
-            processed = self.four_point_transform(original, approx.reshape(4, 2))
-        else:
-            rect = cv2.minAreaRect(c)
-            box = cv2.boxPoints(rect)
-            box = np.int64(box)
-            processed = self.four_point_transform(original, box)
+        # Add a small padding (10px) to not cut edge text
+        h_img, w_img = original.shape[:2]
+        x = max(0, x - 10)
+        y = max(0, y - 10)
+        w = min(w_img - x, w + 20)
+        h = min(h_img - y, h + 20)
 
-        # 7. Rotate if Landscape
-        h, w = processed.shape[:2]
-        if w > h:
-            processed = cv2.rotate(processed, cv2.ROTATE_90_CLOCKWISE)
+        cropped = original[y:y + h, x:x + w]
 
-        return processed
+        # 6. Rotate if Landscape (Make it tall)
+        h_c, w_c = cropped.shape[:2]
+        if w_c > h_c:
+            cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
+
+        return cropped
